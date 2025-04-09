@@ -1,0 +1,36 @@
+{
+  "name": "Bio Link Detector",
+  "description": "A Telegram bot that removes users with unauthorized bio links and offers admin controls, whitelisting, and logging.",
+  "logo": "https://biolinksdetector.github.io/Bot/src/logo.jpg",
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API ID",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API HASH",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token",
+      "required": true
+    },
+    "MONGO_URL": {
+      "description": "MongoDB Connection String",
+      "required": true
+    },
+    "LOG_GROUP_ID": {
+      "description": "Log Group Chat ID",
+      "required": true
+    },
+    "BOT_ADMINS": {
+      "description": "Comma-separated Admin User IDs",
+      "required": true
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
