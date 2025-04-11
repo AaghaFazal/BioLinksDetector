@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 
-
 # logging
 logging.basicConfig(
     level=logging.INFO,
@@ -591,6 +590,49 @@ async def generate_and_plot_graph(timeframe: str = "24h"):
     plt.close()
 
     return path
+
+
+
+
+async def has_link_in_bio(user_id: int):
+    """Check if user's bio has a link with MongoDB-based cooldown and logs each hit."""
+
+    now = time.time()
+    user_data = bio_cooldown_collection.find_one({"user_id": user_id})
+    last_checked = user_data.get("last_checked", 0) if user_data else 0
+
+    # Log every time this function is called (optional: only if it's a new check)
+    if now - last_checked >= 15:
+        with open("bio_hits_log.txt", "a") as log_file:
+            timestamp = datetime.utcnow().isoformat()
+            log_file.write(f"{timestamp},{user_id}\n")
+
+    if now - last_checked < 15:
+        cached_result = user_data.get("has_link") if user_data else None
+        return cached_result if cached_result is not None else False
+
+    try:
+        user = await bot.get_chat(user_id)
+        bio = user.bio or ""
+        has_link = bool(re.search(r"(https?://\S+|t\.me/\S+|@\S+|\b\w+\.\w{2,}\b)", bio))
+
+        bio_cooldown_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"last_checked": now, "has_link": has_link}},
+            upsert=True
+        )
+
+        return has_link
+
+    except FloodWait as e:
+        logging.info(f"[FloodWait] Sleeping for {e.value} seconds")
+        await asyncio.sleep(e.value)
+        return await has_link_in_bio(user_id)
+
+    except Exception as e:
+        logging.error(f"Error fetching bio for {user_id}: {e}")
+        return False
+
 
 # ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
