@@ -1,7 +1,9 @@
 git+https://github.com/AaghaFazal/pyrogram.git
 tgcrypto
-pymongo
 aiohttp
 psutil
 speedtest-cli
 python-dotenv
+pandas
+matplotlib
+mplfinance
