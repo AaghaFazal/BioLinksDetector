@@ -12,6 +12,15 @@ import re
 import config 
 
 
+import os
+import pandas as pd
+import mplfinance as mpf
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+
+
 # logging
 logging.basicConfig(
     level=logging.INFO,
@@ -454,7 +463,7 @@ async def list_whitelisted_users(client: Client, message: Message):
         await no_users_msg.delete()
         return
 
-    user_list = "✅ **whitelisted Users:**\n"
+    user_list = "> **Whitelisted Users:**\n\n"
     for user in whitelisted_users:
         try:
             user_info = await client.get_users(user['user_id'])
@@ -464,7 +473,7 @@ async def list_whitelisted_users(client: Client, message: Message):
             user_list += f"- [{full_name}](tg://user?id={user['user_id']})\n"
         except Exception as e:
             logging.error(f"Error fetching user info for {user['user_id']}: {e}")
-            user_list += f"- User ID: {user['user_id']} (Unable to fetch name)\n"
+            user_list += f"- User ID: {user['user_id']} (Deleted Account or Blocked)\n"
 
     sent_list_message = await client.send_message(chat_id, user_list)
     await message.delete()
@@ -474,42 +483,154 @@ async def list_whitelisted_users(client: Client, message: Message):
 
 # ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-async def has_link_in_bio(user_id: int):
-    """Check if user's bio has a link with MongoDB-based 4-second cooldown."""
 
-    now = time.time()
-
-    # Find the user's last check time
-    user_data = bio_cooldown_collection.find_one({"user_id": user_id})
-    last_checked = user_data.get("last_checked", 0) if user_data else 0
-
-    # If it's been less than 4 seconds, return cached result if we have it
-    if now - last_checked < 15:
-        cached_result = user_data.get("has_link") if user_data else None
-        return cached_result if cached_result is not None else False
-
+@bot.on_message(filters.command("graph"))
+async def graph_command(client, message: Message):
+    args = message.text.split()
+    timeframe = args[1] if len(args) > 1 else "24h"
     try:
-        user = await bot.get_chat(user_id)
-        bio = user.bio or ""
-        has_link = bool(re.search(r"(https?://\S+|t\.me/\S+|@\S+|\b\w+\.\w{2,}\b)", bio))
-
-        # Update Mongo with result and timestamp
-        bio_cooldown_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"last_checked": now, "has_link": has_link}},
-            upsert=True
-        )
-
-        return has_link
-
-    except FloodWait as e:
-        logging.info(f"[FloodWait] Sleeping for {e.value} seconds")
-        await asyncio.sleep(e.value)
-        return await has_link_in_bio(user_id)  # Retry
+        path = await generate_and_plot_graph(timeframe)
+        sent = await message.reply_photo(photo=path, caption=f"📊 Bio Link Checks Over Last `{timeframe}`", quote=True)
+        
+        # Optionally wait before deleting (like 10 seconds)
+        await asyncio.sleep(10)
+        
+        os.remove(path)  # Optional: clean up the local image file
 
     except Exception as e:
-        logging.error(f"Error fetching bio for {user_id}: {e}")
-        return False
+        await message.reply_text(f"❌ Error generating graph:\n{e}")
+
+
+async def generate_and_plot_graph(timeframe: str = "24h"):
+    log_file = "bio_hits_log.txt"
+    if not os.path.exists(log_file):
+        raise FileNotFoundError("bio_hits_log.txt not found.")
+
+    # Load and prepare data
+    df = pd.read_csv(log_file, names=["timestamp", "user_id"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df.set_index("timestamp", inplace=True)
+
+    now = datetime.utcnow()
+    if timeframe.endswith("h"):
+        delta = timedelta(hours=int(timeframe[:-1]))
+    elif timeframe.endswith("d"):
+        delta = timedelta(days=int(timeframe[:-1]))
+    else:
+        raise ValueError("Use format like `6h`, `3d`, or `30d`.")
+
+    df = df[df.index >= now - delta]
+    resampled = df["user_id"].resample("1Min").count()
+
+    # Construct OHLC
+    ohlc = pd.DataFrame({
+        "Open": resampled.shift(1).fillna(0),
+        "High": resampled.rolling(2).max().fillna(0),
+        "Low": resampled.rolling(2).min().fillna(0),
+        "Close": resampled.fillna(0)
+    }).dropna()
+
+    if ohlc.shape[0] > 1:
+        ohlc = ohlc.iloc[:-1]
+
+    # Reset index for plotting
+    ohlc.reset_index(inplace=True)
+    ohlc["timestamp_num"] = mdates.date2num(ohlc["timestamp"])
+
+    # Color logic based on Close value trend
+    close_values = ohlc["Close"].values
+    colors = []
+    for i in range(len(close_values)):
+        if i == 0:
+            colors.append("gray")
+        elif close_values[i] > close_values[i - 1]:
+            colors.append("green")
+        elif close_values[i] < close_values[i - 1]:
+            colors.append("red")
+        else:
+            colors.append("gray")  # no change
+
+    # Plot using matplotlib
+    fig, ax = plt.subplots(figsize=(10, 4))
+    width = 0.0008  # Candle width in matplotlib date units
+
+    if ohlc.empty:
+        # If no data, show red line at y=0
+        ax.axhline(0, color="red", linestyle="--", linewidth=2)
+    else:
+        for i, row in ohlc.iterrows():
+            low = row["Low"]
+            high = row["High"]
+            open_ = row["Open"]
+            close = row["Close"]
+            color = colors[i]
+
+            if open_ == close and high == low:
+                continue  # skip flat candles
+
+            # Wick
+            ax.plot([row["timestamp_num"], row["timestamp_num"]], [low, high], color=color, linewidth=1)
+
+            # Body
+            ax.add_patch(plt.Rectangle(
+                (row["timestamp_num"] - width / 2, min(open_, close)),
+                width,
+                max(0.5, abs(open_ - close)),  # minimum height for visibility
+                color=color
+            ))
+
+    ax.xaxis_date()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    plt.title(f"Bio Link Checks - Last {timeframe}")
+    plt.ylabel("Checks / Min")
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.tight_layout()
+
+    path = f"bio_hits_candle_{timeframe}.png"
+    plt.savefig(path)
+    plt.close()
+
+    return path
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# async def has_link_in_bio(user_id: int):
+#     """Check if user's bio has a link with MongoDB-based 4-second cooldown."""
+
+#     now = time.time()
+
+#     # Find the user's last check time
+#     user_data = bio_cooldown_collection.find_one({"user_id": user_id})
+#     last_checked = user_data.get("last_checked", 0) if user_data else 0
+
+#     # If it's been less than 4 seconds, return cached result if we have it
+#     if now - last_checked < 15:
+#         cached_result = user_data.get("has_link") if user_data else None
+#         return cached_result if cached_result is not None else False
+
+#     try:
+#         user = await bot.get_chat(user_id)
+#         bio = user.bio or ""
+#         has_link = bool(re.search(r"(https?://\S+|t\.me/\S+|@\S+|\b\w+\.\w{2,}\b)", bio))
+
+#         # Update Mongo with result and timestamp
+#         bio_cooldown_collection.update_one(
+#             {"user_id": user_id},
+#             {"$set": {"last_checked": now, "has_link": has_link}},
+#             upsert=True
+#         )
+
+#         return has_link
+
+#     except FloodWait as e:
+#         logging.info(f"[FloodWait] Sleeping for {e.value} seconds")
+#         await asyncio.sleep(e.value)
+#         return await has_link_in_bio(user_id)  # Retry
+
+#     except Exception as e:
+#         logging.error(f"Error fetching bio for {user_id}: {e}")
+#         return False
+
 
 
 @bot.on_message(filters.group & ~filters.bot, group=1)
@@ -558,6 +679,22 @@ async def check_bio_links(client: Client, message: Message):
 
     except Exception as e:
         logging.error(f"Error in check_bio_links: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
